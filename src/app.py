@@ -9,6 +9,10 @@ from pandas.api.types import (
 )
 import extract as extract
 
+# ------------------------------
+# Utilidades
+# ------------------------------
+
 def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     Adds a UI on top of a dataframe to let viewers filter columns
@@ -55,7 +59,7 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             elif is_numeric_dtype(df[column]):
                 _min = float(df[column].min())
                 _max = float(df[column].max())
-                step = (_max - _min) / 100
+                step = (_max - _min) / 100 if _max != _min else 1.0
                 user_num_input = right.slider(
                     f"Valores para {column}",
                     min_value=_min,
@@ -85,7 +89,72 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+
+def _build_valor_nfe(df: pd.DataFrame) -> pd.DataFrame:
+    """Calcula a coluna VALOR NFE de forma idempotente para o DF recebido."""
+    if df.empty:
+        df["VALOR NFE"] = 0
+        return df
+
+    df = df.copy()
+    df["VALOR NFE"] = 0
+    cols_to_add = [
+        'VALOR TOTAL', 'VALOR FRETE', 'VALOR SEGURO',
+        'DESPESAS ACESSORIAS', 'VALOR ST', 'VALOR FCPST',
+        'VALOR IPI', 'IPI DEVOLVIDO', 'VLR II'
+    ]
+    cols_to_subtract = ['VALOR DESCONTO']
+
+    for col in cols_to_add:
+        if col in df.columns:
+            df['VALOR NFE'] += df[col].fillna(0)
+    for col in cols_to_subtract:
+        if col in df.columns:
+            df['VALOR NFE'] -= df[col].fillna(0)
+    return df
+
+
+# ------------------------------
+# Callbacks reativos
+# ------------------------------
+
+def compute_faturamento():
+    base = st.session_state.get("sieg_view", st.session_state.get("sieg_data", pd.DataFrame()))
+    cfops = st.session_state.get("faturamento_selector", [])
+    if base is None:
+        base = pd.DataFrame()
+
+    if cfops:
+        df = base[base['CFOP'].isin(cfops)].copy()
+        st.session_state.df_faturamento = _build_valor_nfe(df)
+    else:
+        st.session_state.df_faturamento = pd.DataFrame()
+
+    # marcar uma versão para forçar dependências a recarregarem
+    st.session_state["_apuracao_version"] = st.session_state.get("_apuracao_version", 0) + 1
+
+
+def compute_devolucao():
+    base = st.session_state.get("sieg_view", st.session_state.get("sieg_data", pd.DataFrame()))
+    cfops = st.session_state.get("devolucao_selector", [])
+    if base is None:
+        base = pd.DataFrame()
+
+    if cfops:
+        df = base[base['CFOP'].isin(cfops)].copy()
+        st.session_state.df_devolucao = _build_valor_nfe(df)
+    else:
+        st.session_state.df_devolucao = pd.DataFrame()
+
+    st.session_state["_apuracao_version"] = st.session_state.get("_apuracao_version", 0) + 1
+
+
+# ------------------------------
+# App
+# ------------------------------
+
 def __init__():
+    # Estado inicial
     if 'sieg_data' not in st.session_state:
         st.session_state.sieg_data = pd.DataFrame()
     if 'pgdas_data' not in st.session_state:
@@ -96,70 +165,8 @@ def __init__():
         st.session_state.df_devolucao = pd.DataFrame()
     if 'processing_reports' not in st.session_state:
         st.session_state.processing_reports = []
-
-
-    def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Adds a UI on top of a dataframe to let viewers filter columns.
-        This function is preserved from your original code.
-        """
-        modify = st.checkbox("Adicionar filtros")
-
-        if not modify:
-            return df
-
-        df = df.copy()
-
-        # Data type conversion logic from your original code
-        for col in df.columns:
-            if is_object_dtype(df[col]):
-                try:
-                    df[col] = pd.to_datetime(df[col])
-                except Exception:
-                    pass
-            if is_datetime64_any_dtype(df[col]):
-                df[col] = df[col].dt.tz_localize(None)
-
-        modification_container = st.container()
-
-        with modification_container:
-            to_filter_columns = st.multiselect("Filtrar tabela em:", df.columns, placeholder='Escolha as opções')
-            for column in to_filter_columns:
-                left, right = st.columns((1, 20))
-                if is_categorical_dtype(df[column]) or df[column].nunique() < 10:
-                    user_cat_input = right.multiselect(
-                        f"Valores para {column}",
-                        df[column].unique(),
-                        placeholder='Escolha as opções',
-                        default=list(df[column].unique()),
-                    )
-                    df = df[df[column].isin(user_cat_input)]
-                elif is_numeric_dtype(df[column]):
-                    _min = float(df[column].min())
-                    _max = float(df[column].max())
-                    step = (_max - _min) / 100
-                    user_num_input = right.slider(
-                        f"Valores para {column}",
-                        min_value=_min,
-                        max_value=_max,
-                        value=(_min, _max),
-                        step=step,
-                    )
-                    df = df[df[column].between(*user_num_input)]
-                elif is_datetime64_any_dtype(df[column]):
-                    user_date_input = right.date_input(
-                        f"Valores para {column}",
-                        value=(df[column].min(), df[column].max()),
-                    )
-                    if len(user_date_input) == 2:
-                        user_date_input = tuple(map(pd.to_datetime, user_date_input))
-                        start_date, end_date = user_date_input
-                        df = df.loc[df[column].between(start_date, end_date)]
-                else:
-                    user_text_input = right.text_input(f"Substring or regex in {column}")
-                    if user_text_input:
-                        df = df[df[column].astype(str).str.contains(user_text_input)]
-        return df
+    if '_apuracao_version' not in st.session_state:
+        st.session_state._apuracao_version = 0
 
     # --- Main App ---
     st.set_page_config(page_title='SAT-SN', layout="wide")
@@ -199,6 +206,7 @@ def __init__():
             st.session_state.processing_reports = []
             st.session_state.df_faturamento = pd.DataFrame()
             st.session_state.df_devolucao = pd.DataFrame()
+            st.session_state.sieg_view = pd.DataFrame()
 
             pgdas_data_all = []
             sieg_data_all = pd.DataFrame()
@@ -253,10 +261,7 @@ def __init__():
                 progress_status.empty()
                 progress_bar.empty()
 
-
-    # Display processing reports outside the button logic
     if st.session_state.processing_reports:
- 
         with st.expander('Relatório de Processamento', expanded=False):
             # Make the report scrollable with a fixed height
             st.markdown(
@@ -270,15 +275,16 @@ def __init__():
                     st.success(report)
                 else:
                     st.error(report)
-                st.markdown("</div>", unsafe_allow_html=True)
-
+            st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("---")
 
     st.header("SIEG")
     if not st.session_state.sieg_data.empty:
         with st.expander('Valores Sieg'):
-            st.dataframe(filter_dataframe(st.session_state.sieg_data))
-        
+            sieg_view = filter_dataframe(st.session_state.sieg_data)
+            st.session_state.sieg_view = sieg_view  # base para os cálculos
+            st.dataframe(sieg_view)
+
         with st.expander('Faturamento e Devolução'):
             all_cfops = sorted(st.session_state.sieg_data['CFOP'].unique())
             col1, col2 = st.columns(2)
@@ -286,27 +292,19 @@ def __init__():
             # --- Faturamento ---
             with col1:
                 st.subheader("Faturamento")
-                selected_cfops_faturamento = st.multiselect(
+                st.multiselect(
                     label="Selecione os CFOPs de faturamento:",
                     options=all_cfops,
-                    key='faturamento_selector'
+                    key='faturamento_selector',
+                    on_change=compute_faturamento,
                 )
-                if selected_cfops_faturamento:
-                    faturamento_filtered_data = st.session_state.sieg_data[st.session_state.sieg_data['CFOP'].isin(selected_cfops_faturamento)].copy()
-                    faturamento_filtered_data['VALOR NFE'] = 0
-                    cols_to_add = ['VALOR TOTAL', 'VALOR FRETE', 'VALOR SEGURO', 'DESPESAS ACESSORIAS', 'VALOR ST', 'VALOR FCPST', 'VALOR IPI', 'IPI DEVOLVIDO', 'VLR II']
-                    cols_to_subtract = ['VALOR DESCONTO']
-                    for col in cols_to_add:
-                        if col in faturamento_filtered_data.columns:
-                            faturamento_filtered_data['VALOR NFE'] += faturamento_filtered_data[col].fillna(0)
-                    for col in cols_to_subtract:
-                        if col in faturamento_filtered_data.columns:
-                            faturamento_filtered_data['VALOR NFE'] -= faturamento_filtered_data[col].fillna(0)
-                    
-                    st.session_state.df_faturamento = faturamento_filtered_data.copy()
-                    pivot_table_faturamento = pd.pivot_table(faturamento_filtered_data, index='CFOP', values=['VALOR NFE'], aggfunc='sum')
-                    total_valor_nfe = faturamento_filtered_data['VALOR NFE'].sum()
-                    
+
+                # exibir resultados atuais
+                if not st.session_state.df_faturamento.empty:
+                    pivot_table_faturamento = pd.pivot_table(
+                        st.session_state.df_faturamento, index='CFOP', values=['VALOR NFE'], aggfunc='sum'
+                    )
+                    total_valor_nfe = st.session_state.df_faturamento['VALOR NFE'].sum()
                     with st.expander("Visualizar Tabela de Faturamento", expanded=True):
                         st.dataframe(pivot_table_faturamento.style.format("R$ {:,.2f}"), use_container_width=True)
                         st.metric(label="**TOTAL GERAL FATURAMENTO**", value=f"R$ {total_valor_nfe:,.2f}")
@@ -316,32 +314,30 @@ def __init__():
             # --- Devolução ---
             with col2:
                 st.subheader("Devolução")
-                selected_cfops_devolucao = st.multiselect(
+                st.multiselect(
                     label="Selecione os CFOPs de devolução:",
                     options=all_cfops,
-                    key='devolucao_selector'
+                    key='devolucao_selector',
+                    on_change=compute_devolucao,
                 )
-                if selected_cfops_devolucao:
-                    devolucao_filtered_data = st.session_state.sieg_data[st.session_state.sieg_data['CFOP'].isin(selected_cfops_devolucao)].copy()
-                    devolucao_filtered_data['VALOR NFE'] = 0
-                    cols_to_add = ['VALOR TOTAL', 'VALOR FRETE', 'VALOR SEGURO', 'DESPESAS ACESSORIAS', 'VALOR ST', 'VALOR FCPST', 'VALOR IPI', 'IPI DEVOLVIDO', 'VLR II']
-                    cols_to_subtract = ['VALOR DESCONTO']
-                    for col in cols_to_add:
-                        if col in devolucao_filtered_data.columns:
-                            devolucao_filtered_data['VALOR NFE'] += devolucao_filtered_data[col].fillna(0)
-                    for col in cols_to_subtract:
-                        if col in devolucao_filtered_data.columns:
-                            devolucao_filtered_data['VALOR NFE'] -= devolucao_filtered_data[col].fillna(0)
 
-                    st.session_state.df_devolucao = devolucao_filtered_data.copy()
-                    pivot_table_devolucao = pd.pivot_table(devolucao_filtered_data, index='CFOP', values=['VALOR NFE'], aggfunc='sum')
-                    total_valor_nfe_dev = devolucao_filtered_data['VALOR NFE'].sum()
+                if not st.session_state.df_devolucao.empty:
+                    pivot_table_devolucao = pd.pivot_table(
+                        st.session_state.df_devolucao, index='CFOP', values=['VALOR NFE'], aggfunc='sum'
+                    )
+                    total_valor_nfe_dev = st.session_state.df_devolucao['VALOR NFE'].sum()
 
                     with st.expander("Visualizar Tabela de Devolução", expanded=True):
                         st.dataframe(pivot_table_devolucao.style.format("R$ {:,.2f}"), use_container_width=True)
                         st.metric(label="**TOTAL GERAL DEVOLUÇÃO**", value=f"R$ {total_valor_nfe_dev:,.2f}")
                 else:
                     st.info("Selecione um ou mais CFOPs para ver a análise de devolução.")
+
+            # Se o usuário alterou os filtros (tabela de cima), recalcular com as seleções atuais
+            if 'faturamento_selector' in st.session_state:
+                compute_faturamento()
+            if 'devolucao_selector' in st.session_state:
+                compute_devolucao()
 
             st.markdown("<br>", unsafe_allow_html=True)
             if not st.session_state.df_faturamento.empty:
@@ -355,83 +351,112 @@ def __init__():
     st.markdown("---")
 
     st.header("Apuração")
-    if st.session_state.pgdas_data and not st.session_state.sieg_data.empty:
+    # A simples leitura de '_apuracao_version' garante que a seção reaja às mudanças
+    _ = st.session_state.get('_apuracao_version', 0)
+
+    if st.session_state.pgdas_data or not st.session_state.sieg_data.empty:
         with st.expander('Resumo da Apuração', expanded=True):
             try:
                 pgdas_list_of_dicts = [p.__dict__ for p in st.session_state.pgdas_data]
                 df_pgdas = pd.DataFrame(pgdas_list_of_dicts)
                 
                 if 'total' in df_pgdas.columns:
-                    df_pgdas['total'] = pd.to_numeric(df_pgdas['total'].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False), errors='coerce')
+                    df_pgdas['total'] = pd.to_numeric(
+                        df_pgdas['total'].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False),
+                        errors='coerce'
+                    )
                 else:
                     st.error("Coluna 'total' não encontrada nos dados extraídos do PGDAS. Verifique a extração.")
                     st.stop()
                 if 'periodo' in df_pgdas.columns:
                     df_pgdas['periodo'] = df_pgdas['periodo'].astype(str)
                     periodos = df_pgdas['periodo'].astype(str).unique()
-                    anos = sorted({p[3:] for p in periodos}) # MM/YYYY format
+                    anos = sorted({p[3:] for p in periodos})  # MM/YYYY
 
                     # --- Add Toggles for Filtering ---
                     col1, col2 = st.columns(2)
                     with col1:
-                        show_correct = st.toggle('Mostrar meses corretos', value=True)
+                        show_correct = st.checkbox('Mostrar meses corretos', value=True)
                     with col2:
-                        show_incorrect = st.toggle('Mostrar meses com divergência', value=True)
+                        show_incorrect = st.checkbox('Mostrar meses com divergência', value=True)
                     
                     # Prepare SIEG data for matching
                     df_fat_copy = st.session_state.df_faturamento.copy()
                     df_dev_copy = st.session_state.df_devolucao.copy()
                     
-                    if 'DATA EMISSAO' in df_fat_copy.columns and 'DATA EMISSAO' in df_dev_copy.columns:
-                        df_fat_copy['DATA EMISSAO'] = pd.to_datetime(df_fat_copy['DATA EMISSAO'])
-                        df_dev_copy['DATA EMISSAO'] = pd.to_datetime(df_dev_copy['DATA EMISSAO'])
+                    if ('DATA EMISSAO' in df_fat_copy.columns) or ('DATA EMISSAO' in df_dev_copy.columns):
+                        if 'DATA EMISSAO' in df_fat_copy.columns:
+                            df_fat_copy['DATA EMISSAO'] = pd.to_datetime(df_fat_copy['DATA EMISSAO'], errors='coerce')
+                        else:
+                            df_fat_copy['DATA EMISSAO'] = pd.NaT  # placeholder column
+                        
+                        if 'DATA EMISSAO' in df_dev_copy.columns:
+                            df_dev_copy['DATA EMISSAO'] = pd.to_datetime(df_dev_copy['DATA EMISSAO'], errors='coerce')
+                        else:
+                            df_dev_copy['DATA EMISSAO'] = pd.NaT  # placeholder column
+                        # Distribute years evenly across columns, avoiding empty columns
+                        num_cols = min(3, len(anos))
+                        cols = st.columns(num_cols)
+                        for idx, ano in enumerate(anos):
+                            col = cols[idx % num_cols]
+                            with col:
+                                st.subheader(f"🗓️ {ano}")
+                                with st.expander(''):
+                                    periodos_do_ano = sorted({p for p in periodos if p.endswith(ano)})
+                                    cols_p = st.columns(2)
+                                    for idx_p, periodo in enumerate(periodos_do_ano):
+                                        col = cols_p[idx_p % 2]
+                                        with col:
+                                            mes_str = periodo[:2]
+                                            ano_str = periodo[3:]
 
-                        for ano in anos:
-                            st.subheader(f"🗓️ {ano}")
-                            periodos_do_ano = sorted({p for p in periodos if p.endswith(ano)})
-                            for periodo in periodos_do_ano:
-                                mes_str = periodo[:2]
-                                ano_str = periodo[3:]
-                                faturamento_mes = df_fat_copy[
-                                    (df_fat_copy['DATA EMISSAO'].dt.month == int(mes_str)) &
-                                    (df_fat_copy['DATA EMISSAO'].dt.year == int(ano_str))
-                                ]['VALOR NFE'].sum()
-                                print(faturamento_mes)
-                                devolucao_mes = df_dev_copy[
-                                    (df_dev_copy['DATA EMISSAO'].dt.month == int(mes_str)) &
-                                    (df_dev_copy['DATA EMISSAO'].dt.year == int(ano_str))
-                                ]['VALOR NFE'].sum()
+                                            faturamento_mes = (
+                                                df_fat_copy[
+                                                    (df_fat_copy['DATA EMISSAO'].dt.month == int(mes_str)) &
+                                                    (df_fat_copy['DATA EMISSAO'].dt.year == int(ano_str))
+                                                ]['VALOR NFE'].sum()
+                                                if 'VALOR NFE' in df_fat_copy.columns else 0
+                                            )
 
-                                total_pgdas_series = df_pgdas[df_pgdas['periodo'] == periodo]['total']
-                                if not total_pgdas_series.empty:
-                                    total_pgdas = total_pgdas_series.iloc[0]
-                                    total_sieg = faturamento_mes - devolucao_mes
+                                            devolucao_mes = (
+                                                df_dev_copy[
+                                                    (df_dev_copy['DATA EMISSAO'].dt.month == int(mes_str)) &
+                                                    (df_dev_copy['DATA EMISSAO'].dt.year == int(ano_str))
+                                                ]['VALOR NFE'].sum()
+                                                if 'VALOR NFE' in df_dev_copy.columns else 0
+                                            )
 
-                                    is_correct = abs(total_pgdas - total_sieg) == 0 # Using a small tolerance for float comparison
+                                            total_pgdas_series = df_pgdas[df_pgdas['periodo'] == periodo]['total']
+                                            if not total_pgdas_series.empty:
+                                                total_pgdas = total_pgdas_series.iloc[0]
+                                                total_sieg = faturamento_mes - devolucao_mes
 
-                                    if (is_correct and show_correct) or (not is_correct and show_incorrect):
-                                        
-                                        border_color = "green" if is_correct else "red"
-                                        st.markdown(f"""
-                                        <div style="border: 2px solid {border_color}; border-radius: 5px; padding: 10px; margin-bottom: 10px;">
-                                            <h4>Período: {periodo}</h4>
-                                            <p><strong>Total PGDAS:</strong> R$ {total_pgdas:,.2f}</p>
-                                            <p><strong>Faturamento SIEG:</strong> R$ {faturamento_mes:,.2f}</p>
-                                            <p><strong>Devolução SIEG:</strong> R$ {devolucao_mes:,.2f}</p>
-                                            <p><strong>Total SIEG (Fat - Dev):</strong> R$ {total_sieg:,.2f}</p>
-                                            <h5 style="color:{border_color};">Diferença: R$ {total_pgdas - total_sieg:,.2f}</h5>
-                                        </div>
-                                        """, unsafe_allow_html=True)
+                                                is_correct = abs(total_pgdas - total_sieg) == 0
+                                                if (is_correct and show_correct) or (not is_correct and show_incorrect):
+                                                    border_color = "green" if is_correct else "red"
+                                                    with st.expander(f'{periodo}', expanded=True):
+                                                        st.markdown(f"""
+                                                        <div style="border: 2px solid {border_color}; border-radius: 5px; padding: 10px; margin-bottom: 10px;">
+                                                            <h4>Período: {periodo}</h4>
+                                                            <p><strong>Total PGDAS:</strong> R$ {total_pgdas:,.2f}</p>
+                                                            <p><strong>Faturamento SIEG:</strong> R$ {faturamento_mes:,.2f}</p>
+                                                            <p><strong>Devolução SIEG:</strong> R$ {devolucao_mes:,.2f}</p>
+                                                            <p><strong>Total SIEG (Fat - Dev):</strong> R$ {total_sieg:,.2f}</p>
+                                                            <h5 style="color:{border_color};">Diferença: R$ {total_pgdas - total_sieg:,.2f}</h5>
+                                                        </div>
+                                                        """, unsafe_allow_html=True)
+
                     else:
-                        st.warning("A coluna 'DATA EMISSAO' é necessária para a apuração. Verifique os dados do SIEG.")
+                        st.warning("Filtre faturação ou devolução.")
                 else:
-                    st.warning("Coluna 'Período' não encontrada nos dados do PGDAS.")
+                    st.warning("Coluna 'periodo' não encontrada nos dados do PGDAS.")
             except Exception as e:
                 st.error(f"Ocorreu um erro ao processar a apuração: {e}")
                 st.warning("Verifique se os dados estão no formato esperado.")
     else:
         st.info('Importe os dados do PGDAS e do SIEG para a apuração.')
     st.markdown("---")
+
 
 if __name__ == '__main__':
     __init__()

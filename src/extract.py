@@ -135,87 +135,78 @@ def sieg(uploaded_files):
         return pd.DataFrame()
 
     all_dfs = []
+
+    # Process uploaded files
     for uploaded_file in uploaded_files:
         try:
-            df = pd.read_excel(uploaded_file, sheet_name='PRODUTOS', engine='openpyxl', dtype={'NCM': str})
-            required_cols = ['CFOP', 'NCM', 'DATA EMISSAO']
-            
+            df = pd.read_excel(
+                uploaded_file,
+                sheet_name="PRODUTOS",
+                engine="calamine",
+                dtype={"NCM": str}
+            )
+
+            required_cols = ["CFOP", "NCM", "DATA EMISSAO"]
             if not all(col in df.columns for col in required_cols):
                 st.error(
-                    f"Erro em '{uploaded_file.name}': A planilha 'PRODUTOS' deve conter as colunas: "
-                    f"{', '.join(required_cols)}. Este arquivo será ignorado."
+                    f"Erro em '{uploaded_file.name}': "
+                    f"A planilha 'PRODUTOS' deve conter as colunas: {', '.join(required_cols)}. "
+                    "Este arquivo será ignorado."
                 )
                 continue
+
+            # Padroniza colunas importantes
+            df["NCM"] = df["NCM"].astype(str).str.strip()
+            df["DATA EMISSAO"] = pd.to_datetime(df["DATA EMISSAO"], errors="coerce")
+
             all_dfs.append(df)
 
         except Exception as e:
             st.error(
-                f"Não foi possível ler o arquivo '{uploaded_file.name}'. Verifique o formato "
-                f"e se a planilha 'PRODUTOS' existe. Detalhes: {e}"
+                f"Não foi possível ler o arquivo '{uploaded_file.name}'. "
+                f"Verifique o formato e se a planilha 'PRODUTOS' existe. Detalhes: {e}"
             )
-            continue 
-            
+            continue
+
     if not all_dfs:
         st.warning("Nenhum arquivo SIEG válido foi processado.")
         return pd.DataFrame()
 
+    # Junta todos os arquivos
     final_df = pd.concat(all_dfs, ignore_index=True)
 
-    # --- PIS/COFINS Calculation ---
+
+    # --- PIS/COFINS ---
     piscofins_df = tributos.piscofins()
-    
-    final_df['NCM'] = final_df['NCM'].astype(str).str.strip()
-    piscofins_df['NCM'] = piscofins_df['NCM'].astype(str).str.strip()
+    piscofins_df["NCM"] = piscofins_df["NCM"].astype(str).str.strip()
+    piscofins_indexed = piscofins_df.set_index("NCM")["TRIBUTAÇÃO"]
 
-    piscofins_indexed = piscofins_df.set_index('NCM')['TRIBUTAÇÃO']
+    final_df["PIS/COFINS"] = final_df["NCM"].map(piscofins_indexed)
+    final_df["PIS/COFINS"] = final_df["PIS/COFINS"].fillna("NCM NÃO IDENTIFICADO")
 
-    # 2. Mapeie os valores para a coluna 'PIS COFINS'
-    final_df['PIS/COFINS'] = final_df['NCM'].map(piscofins_indexed)
-    final_df['PIS/COFINS'] = final_df['PIS/COFINS'].fillna('NCM NÃO IDENTIFICADO')
-
-    final_df = final_df[['PIS/COFINS'] + [col for col in final_df.columns if col != 'PIS/COFINS']]
 
     # --- ICMS ---
     icms_df = tributos.icms()
+    icms_df["NCM"] = icms_df["NCM"].astype(str).str.strip()
+    icms_df["INICIO"] = pd.to_datetime(icms_df["INICIO"], dayfirst=True, errors="coerce")
+    icms_df["FIM"] = pd.to_datetime(icms_df["FIM"], dayfirst=True, errors="coerce")
 
-    # Garantir NCM como string e sem espaços
-    icms_df['NCM'] = icms_df['NCM'].astype(str).str.strip()
+    merged = final_df.merge(
+    icms_df,
+    on="NCM",
+    how="left",
+    suffixes=("", "_icms")
+    )
 
-    # Renomear colunas apenas se necessário
-    icms_df = icms_df.rename(columns={
-        'Descricao': 'DESCRIÇÃO',
-        'descricao': 'DESCRIÇÃO',
-        'Cest': 'CEST',
-        'cest': 'CEST',
-        'Classificacao': 'CLASSIFICAÇÃO',
-        'classificacao': 'CLASSIFICAÇÃO'
-    })
+    # Filtra por intervalo de datas
+    mask = (merged["DATA EMISSAO"] >= merged["INICIO"]) & (merged["DATA EMISSAO"] <= merged["FIM"])
+    merged = merged[mask]
 
-    # Garantir que colunas obrigatórias existam
-    for col in ['INICIO', 'FIM', 'CEST', 'DESCRIÇÃO', 'CLASSIFICAÇÃO']:
-        if col not in icms_df.columns:
-            icms_df[col] = None
+    # Garante uma única classificação por linha original
+    icms_map = merged.groupby(merged.index)["CLASSIFICAÇÃO"].first()
 
-    # Conversão de datas
-    final_df['DATA EMISSAO'] = pd.to_datetime(final_df['DATA EMISSAO'], errors='coerce')
-    icms_df['INICIO'] = pd.to_datetime(icms_df['INICIO'], errors='coerce').fillna(pd.to_datetime('1990-01-01'))
-    icms_df['FIM'] = pd.to_datetime(icms_df['FIM'], errors='coerce').fillna(pd.to_datetime('2050-12-31'))
+    # Cria a nova coluna alinhada com df_sieg
+    final_df["ICMS"] = final_df.index.map(icms_map)
 
-    # Merge
-    merged_df = pd.merge(final_df, icms_df, on='NCM', how='left')
-
-    # Função de classificação ICMS
-    def classify_icms(row):
-        if pd.isna(row["INICIO"]):
-            return "NÃO ST"
-        if row["INICIO"] <= row["DATA EMISSAO"] <= row["FIM"]:
-            return row["CLASSIFICAÇÃO"] if pd.notna(row["CLASSIFICAÇÃO"]) else "NÃO ST"
-        return "NÃO ST"
-
-    # Criar coluna ICMS
-    merged_df["ICMS"] = merged_df.apply(classify_icms, axis=1)
-
-    # Reordenar para ICMS aparecer antes
-    cols_to_move = ['ICMS']
-    final_df = merged_df[cols_to_move + [col for col in merged_df.columns if col not in cols_to_move]]
+    
     return final_df
